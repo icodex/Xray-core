@@ -20,6 +20,7 @@ import (
 	"github.com/xtls/xray-core/features/routing"
 	routing_session "github.com/xtls/xray-core/features/routing/session"
 	"github.com/xtls/xray-core/features/stats"
+	"github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/pipe"
 )
@@ -93,21 +94,22 @@ func (r *cachedReader) Interrupt() {
 
 // DefaultDispatcher is a default implementation of Dispatcher.
 type DefaultDispatcher struct {
-	ohm    outbound.Manager
-	router routing.Router
-	policy policy.Manager
-	stats  stats.Manager
-	fdns   dns.FakeDNSEngine
+	ohm       outbound.Manager
+	router    routing.Router
+	policy    policy.Manager
+	stats     stats.Manager
+	bandwidth bandwidth.Manager
+	fdns      dns.FakeDNSEngine
 }
 
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
 		d := new(DefaultDispatcher)
-		if err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager, dc dns.Client) error {
+		if err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager, bm bandwidth.Manager, dc dns.Client) error {
 			core.OptionalFeatures(ctx, func(fdns dns.FakeDNSEngine) {
 				d.fdns = fdns
 			})
-			return d.Init(config.(*Config), om, router, pm, sm)
+			return d.Init(config.(*Config), om, router, pm, sm, bm)
 		}); err != nil {
 			return nil, err
 		}
@@ -116,11 +118,12 @@ func init() {
 }
 
 // Init initializes DefaultDispatcher.
-func (d *DefaultDispatcher) Init(config *Config, om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager) error {
+func (d *DefaultDispatcher) Init(config *Config, om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager, bm bandwidth.Manager) error {
 	d.ohm = om
 	d.router = router
 	d.policy = pm
 	d.stats = sm
+	d.bandwidth = bm
 	return nil
 }
 
@@ -169,6 +172,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 				}
 			}
 		}
+		inboundLink.Writer = applyBandwidthLimit(ctx, inboundLink.Writer, d.bandwidth, user)
 		if p.Stats.UserDownlink {
 			name := "user>>>" + user.Email + ">>>traffic>>>downlink"
 			if c, _ := d.stats.GetOrRegisterCounter(name); c != nil {
@@ -178,6 +182,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 				}
 			}
 		}
+		outboundLink.Writer = applyBandwidthLimit(ctx, outboundLink.Writer, d.bandwidth, user)
 
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, d.stats, user.Email, sessionInbound.Source.Address.String())
@@ -196,6 +201,10 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 
 	link.Reader = &buf.TimeoutWrapperReader{Reader: link.Reader}
 
+	var bandwidthManager bandwidth.Manager
+	if feat := core.MustFromContext(ctx).GetFeature(bandwidth.ManagerType()); feat != nil {
+		bandwidthManager, _ = feat.(bandwidth.Manager)
+	}
 	if user != nil && len(user.Email) > 0 {
 		p := policyManager.ForLevel(user.Level)
 		if p.Stats.UserUplink {
@@ -213,6 +222,7 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 				}
 			}
 		}
+		link.Writer = applyBandwidthLimit(ctx, link.Writer, bandwidthManager, user)
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, statsManager, user.Email, sessionInbound.Source.Address.String())
 		}
@@ -261,6 +271,17 @@ func (d *DefaultDispatcher) shouldOverride(ctx context.Context, result SniffResu
 	}
 
 	return false
+}
+
+func applyBandwidthLimit(ctx context.Context, writer buf.Writer, limiter bandwidth.Manager, user *protocol.MemoryUser) buf.Writer {
+	if limiter == nil || user == nil || user.Email == "" {
+		return writer
+	}
+	lim := limiter.GetUserLimiter(user.Email)
+	if lim == nil {
+		return writer
+	}
+	return &RateLimitWriter{Writer: writer, Limiter: lim, Context: ctx}
 }
 
 // Dispatch implements routing.Dispatcher.
