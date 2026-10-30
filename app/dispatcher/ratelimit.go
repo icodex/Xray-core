@@ -20,9 +20,22 @@ func (w *RateLimitWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		if err := w.Limiter.WaitN(ctx, int(mb.Len())); err != nil {
-			buf.ReleaseMulti(mb)
-			return err
+		// WaitN errors permanently when n exceeds the burst; split large
+		// buffers into burst-sized chunks so small limits can't kill the link.
+		burst := w.Limiter.Burst()
+		if burst <= 0 {
+			burst = 1
+		}
+		for n := int(mb.Len()); n > 0; {
+			c := n
+			if c > burst {
+				c = burst
+			}
+			if err := w.Limiter.WaitN(ctx, c); err != nil {
+				buf.ReleaseMulti(mb)
+				return err
+			}
+			n -= c
 		}
 	}
 	return w.Writer.WriteMultiBuffer(mb)

@@ -14,13 +14,13 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/features/dns"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
 	routing_session "github.com/xtls/xray-core/features/routing/session"
 	"github.com/xtls/xray-core/features/stats"
-	"github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/pipe"
 )
@@ -273,6 +273,8 @@ func (d *DefaultDispatcher) shouldOverride(ctx context.Context, result SniffResu
 	return false
 }
 
+// applyBandwidthLimit wraps writer with the user's limiter. Both directions
+// share one limiter: the cap is combined up+down throughput.
 func applyBandwidthLimit(ctx context.Context, writer buf.Writer, limiter bandwidth.Manager, user *protocol.MemoryUser) buf.Writer {
 	if limiter == nil || user == nil || user.Email == "" {
 		return writer
